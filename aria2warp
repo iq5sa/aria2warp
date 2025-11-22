@@ -1,0 +1,49 @@
+ria2warp — fast, resumable downloads via Cloudflare WARP proxy (macOS)
+# Usage:
+#   aria2warp <url_file> [output_dir]
+#   Example: aria2warp ~/Downloads/urls.txt ~/Downloads/Videos
+
+set -euo pipefail
+
+# WARP proxy settings (change if needed)
+WARP_HOST="${WARP_HOST:-127.0.0.1}"
+WARP_PORT="${WARP_PORT:-40000}"
+PROXY="socks5://${WARP_HOST}:${WARP_PORT}"
+
+# Input URL file (required)
+URL_FILE="$1"
+if [[ -z "$URL_FILE" || ! -f "$URL_FILE" ]]; then
+    echo "Usage: $(basename "$0") <url_file> [output_dir]"
+    exit 1
+fi
+
+# Output folder (optional, defaults to ~/Downloads)
+OUTPUT_DIR="${2:-$HOME/Downloads}"
+mkdir -p "$OUTPUT_DIR"
+
+# Function to run aria2c with optimal settings
+aria2_cmd() {
+    local url="$1"
+    aria2c \
+      -c \
+      -x16 \
+      -s16 \
+      -k1M \
+      --max-connection-per-server=16 \
+      --min-split-size=1M \
+      --file-allocation=none \
+      --continue=true \
+      --summary-interval=0 \
+      --console-log-level=warn \
+      --dir="$OUTPUT_DIR" \
+      --all-proxy="$PROXY" \
+      "$url"
+}
+
+# Read URLs from file line by line and download
+while IFS= read -r url || [[ -n "$url" ]]; do
+    [[ -z "$url" ]] && continue  # skip empty lines
+    echo "Downloading: $url"
+    aria2_cmd "$url"
+done < "$URL_FILE"
+
