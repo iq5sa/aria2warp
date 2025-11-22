@@ -1,49 +1,154 @@
-ria2warp — fast, resumable downloads via Cloudflare WARP proxy (macOS)
+#!/bin/bash
+# aria2warp — fast, resumable downloads via Cloudflare WARP proxy (macOS)
 # Usage:
-#   aria2warp <url_file> [output_dir]
-#   Example: aria2warp ~/Downloads/urls.txt ~/Downloads/Videos
+#   aria2warp <URL> [output_dir]
+#   aria2warp <urls.txt> [output_dir]
+#   cat urls.txt | aria2warp [output_dir]
+#
+# Env:
+#   WARP_HOST (default 127.0.0.1)  WARP_PORT (default 40000)
 
 set -euo pipefail
 
-# WARP proxy settings (change if needed)
 WARP_HOST="${WARP_HOST:-127.0.0.1}"
-WARP_PORT="${WARP_PORT:-40000}"
-PROXY="socks5://${WARP_HOST}:${WARP_PORT}"
+WARP_PORT="${WARP_PORT:-8080}"
+PROXY="http://${WARP_HOST}:${WARP_PORT}"
+OUTDIR_DEFAULT="$HOME/Downloads"
 
-# Input URL file (required)
-URL_FILE="$1"
-if [[ -z "$URL_FILE" || ! -f "$URL_FILE" ]]; then
-    echo "Usage: $(basename "$0") <url_file> [output_dir]"
-    exit 1
+# Detect whether a proxy should be used.
+# Priority:
+# 1. Honor explicit proxy environment variables (ALL_PROXY, HTTPS_PROXY, HTTP_PROXY and lower-case variants).
+# 2. If none set, test the WARP host:port to see if a local proxy is listening.
+# If a proxy is detected/available, aria2 will be called with --all-proxy set; otherwise downloads are direct.
+USE_PROXY=0
+detected_proxy=""
+
+if [[ -n "${ALL_PROXY:-}" ]] || [[ -n "${all_proxy:-}" ]]; then
+  detected_proxy="${ALL_PROXY:-${all_proxy:-}}"
+  USE_PROXY=1
+elif [[ -n "${HTTPS_PROXY:-}" ]] || [[ -n "${https_proxy:-}" ]]; then
+  detected_proxy="${HTTPS_PROXY:-${https_proxy:-}}"
+  USE_PROXY=1
+elif [[ -n "${HTTP_PROXY:-}" ]] || [[ -n "${http_proxy:-}" ]]; then
+  detected_proxy="${HTTP_PROXY:-${http_proxy:-}}"
+  USE_PROXY=1
+else
+  # No env proxy vars set; check WARP host:port for a listening proxy
+  if command -v nc >/dev/null 2>&1; then
+    if nc -z -w1 "$WARP_HOST" "$WARP_PORT" >/dev/null 2>&1; then
+      USE_PROXY=1
+      detected_proxy="$PROXY"
+    fi
+  else
+    # Fallback: try /dev/tcp (bash builtin) where available
+    if (exec 3<>/dev/tcp/"$WARP_HOST"/"$WARP_PORT") >/dev/null 2>&1; then
+      USE_PROXY=1
+      detected_proxy="$PROXY"
+      exec 3>&-
+    fi
+  fi
 fi
 
-# Output folder (optional, defaults to ~/Downloads)
-OUTPUT_DIR="${2:-$HOME/Downloads}"
-mkdir -p "$OUTPUT_DIR"
-
-# Function to run aria2c with optimal settings
-aria2_cmd() {
-    local url="$1"
-    aria2c \
-      -c \
-      -x16 \
-      -s16 \
-      -k1M \
-      --max-connection-per-server=16 \
-      --min-split-size=1M \
-      --file-allocation=none \
-      --continue=true \
-      --summary-interval=0 \
-      --console-log-level=warn \
-      --dir="$OUTPUT_DIR" \
-      --all-proxy="$PROXY" \
-      "$url"
+# If we detected a proxy, use it; otherwise leave PROXY as empty string and do not pass --all-proxy.
+is_valid_proxy() {
+  # Quick validation: must contain a scheme (://) and host:port after scheme
+  local p="$1"
+  # strip CR/LF
+  p="${p//$'\r'/}"
+  p="${p//$'\n'/}"
+  # require a supported scheme: http or https (aria2's --all-proxy expects HTTP proxies)
+  shopt -s nocasematch
+  if [[ "$p" == http://* ]] || [[ "$p" == https://* ]]; then
+    local rest="${p#*://}"
+    # require at least one ':' in rest (host:port or user:pass@host:port)
+    if [[ "$rest" != *":"* ]]; then
+      shopt -u nocasematch
+      return 1
+    fi
+    shopt -u nocasematch
+    return 0
+  fi
+  # explicitly reject socks proxies because aria2 on this system lacks SOCKS support
+  if [[ "$p" == socks://* ]] || [[ "$p" == socks5://* ]] || [[ "$p" == socks4://* ]]; then
+    shopt -u nocasematch
+    return 2
+  fi
+  shopt -u nocasematch
+  return 0
 }
 
-# Read URLs from file line by line and download
-while IFS= read -r url || [[ -n "$url" ]]; do
-    [[ -z "$url" ]] && continue  # skip empty lines
-    echo "Downloading: $url"
-    aria2_cmd "$url"
-done < "$URL_FILE"
+if [[ "$USE_PROXY" -eq 1 && -n "$detected_proxy" ]]; then
+  # sanitize and validate detected_proxy before using it
+  # trim surrounding whitespace
+  detected_proxy="$(printf '%s' "$detected_proxy" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  if is_valid_proxy "$detected_proxy"; then
+    PROXY="$detected_proxy"
+  else
+    code=$?
+    if [[ "$code" -eq 2 ]]; then
+      >&2 echo "aria2warp: warning: detected SOCKS proxy '$detected_proxy' is not supported by your aria2 build; skipping proxy."
+      >&2 echo "  Options: run aria2 under a SOCKS wrapper (torsocks/proxychains) or run a local HTTP->SOCKS bridge (privoxy/socat) and set ALL_PROXY to an http:// URL."
+    else
+      >&2 echo "aria2warp: warning: detected proxy value is malformed, skipping proxy: '$detected_proxy'"
+    fi
+    PROXY=""
+  fi
+else
+  PROXY=""
+fi
 
+arg1="${1:-}"
+arg2="${2:-}"
+
+# If first arg is a directory, treat it as output dir and read URLs from stdin
+if [[ -n "$arg1" && -d "$arg1" ]]; then
+  OUTPUT_DIR="$arg1"
+  URL_MODE="stdin"
+elif [[ -n "$arg2" && -d "$arg2" ]]; then
+  OUTPUT_DIR="$arg2"
+else
+  OUTPUT_DIR="${arg2:-$OUTDIR_DEFAULT}"
+fi
+
+mkdir -p "$OUTPUT_DIR"
+
+aria2_cmd() {
+  # Build arg array so we can conditionally include --all-proxy only when a proxy is actually available.
+  args=(aria2c
+    -c
+    -x16
+    -s16
+    -k1M
+    --max-connection-per-server=16
+    --min-split-size=1M
+    --file-allocation=none
+    --continue=true
+    --summary-interval=0
+    --console-log-level=warn
+    --dir="$OUTPUT_DIR")
+
+  if [[ -n "$PROXY" ]]; then
+    args+=(--all-proxy="$PROXY")
+  fi
+
+  args+=("$@")
+  "${args[@]}"
+}
+
+# Decide input mode
+if [[ "${URL_MODE:-}" == "stdin" ]] || [[ -z "$arg1" ]]; then
+  # Read URLs from STDIN
+  while IFS= read -r url || [[ -n "$url" ]]; do
+    [[ -z "$url" ]] && continue
+    aria2_cmd "$url"
+  done
+elif [[ -f "$arg1" ]]; then
+  # Read URLs from a file
+  while IFS= read -r url || [[ -n "$url" ]]; do
+    [[ -z "$url" ]] && continue
+    aria2_cmd "$url"
+  done < "$arg1"
+else
+  # Single URL
+  aria2_cmd "$arg1"
+fi

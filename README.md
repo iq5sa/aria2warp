@@ -8,7 +8,7 @@
 
 * Multi-connection downloading (`16 connections`)
 * Resumable downloads (`-c`)
-* SOCKS5 proxy via Cloudflare WARP
+* HTTP proxy via Cloudflare WARP
 * Supports single URLs, text files, or stdin
 * Customizable output folder
 * Works anywhere on macOS after adding to PATH
@@ -43,7 +43,12 @@ Download from [Cloudflare WARP](https://developers.cloudflare.com/warp-client/) 
 warp-cli status
 ```
 
-Default SOCKS5 proxy: `127.0.0.1:40000`.
+Enable the built-in HTTP proxy (default port ``8080``):
+
+```bash
+warp-cli proxy port 8080
+```
+>The HTTP proxy will now listen on ``127.0.0.1:8080``.
 
 ---
 
